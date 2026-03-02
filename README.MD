@@ -1,4 +1,4 @@
-# File Organizer - 高效能大量媒體檔案整理工具 (v1.9.0 企業級最終版)
+# File Organizer - 高效能大量媒體檔案整理工具 (v1.9.1 企業級最終版)
 
 這是一個專為處理 **TB 級資料量**、**數百萬個破碎檔案** (如 200 萬 - 300 萬個圖片/影片) 所設計的 Python 高性能整理工具。它採用多執行緒與生產者-消費者架構，能精準解析 EXIF 元數據、檔案名稱或 Google Takeout JSON，並將混亂的媒體檔案自動歸類到結構化的目錄中。
 
@@ -19,6 +19,7 @@
     *   支援 `dry-run` 模擬模式。
     *   複製模式下使用 `shutil.copy2` 完整保留 `ctime`/`mtime`/`atime` 檔案屬性。
     *   支援 `--touch` 功能，強制校正檔案系統時間為拍攝日期。
+*   **智慧過濾機制**：自動忽略副檔名為 `.delete` 的暫存檔案，避免無效處理。
 
 ## 🛠️ 環境需求
 
@@ -79,7 +80,7 @@ python3 file_organizer.py --target [目標目錄] [來源目錄1] [來源目錄2
 2.  **`filename`**：正則過濾檔名。影片檔案強制僅使用此模式。
 3.  **`takeout`**：
     *   僅處理檔名以 `IMG_` 開頭且無 EXIF、無檔名日期資訊的檔案。
-    *   尋找同名 `.json` 檔案並讀取 `photoTakenTime`。
+    *   尋找同名 `.json` 檔案並讀取 `photoTakenTime`。支援多種命名變體，包括 `.json`、`.supplemental-metadata.json` 以及帶有括號數字的變體如 `(1).json`。
     *   自動更名為 `IMG_YYYYMMDD_HHMMSS`。
     *   搬移或刪除時，會一併清理對應的 `.json` 檔案。
 4.  **`auto`**：預設模式，執行 `exif,filename` (EXIF 優先)。
@@ -106,6 +107,7 @@ python3 file_organizer.py --target [目標目錄] [來源目錄1] [來源目錄2
 
 ## 📜 版本紀錄 (Version History)
 
+*   **v1.9.1 (2026-03-02)**: 新增忽略 `.delete` 檔案功能；強化 Takeout 模式 JSON 匹配（支援括號數字變體）。
 *   **v1.9.0 (2026-02-24)**: 新增 `exif` 模式下 `IMG_數字` 的自動改名功能。
 *   **v1.8.2 (2026-02-23)**: 優化進度統計，加入批次耗時回報。
 *   **v1.7.0 (2026-02-21)**: 新增 `takeout` 模式與 UTC+8 時區轉換。
