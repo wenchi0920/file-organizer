@@ -116,7 +116,7 @@ class FileOrganizer:
 
     def __init__(self, args: argparse.Namespace):
         self.sources: List[Path] = [Path(s).resolve() for s in args.sources]
-        self.target: Path = Path(args.target).resolve()
+        self.destination_root: Path = Path(args.target).resolve()
 
         # 操作模式邏輯
         if args.copy and args.move:
@@ -128,14 +128,14 @@ class FileOrganizer:
 
         self.file_type: str = args.type
         self.dry_run: bool = args.dry_run
-        self.allow_delete: bool = args.delete
+        self.delete_duplicate_source: bool = args.delete
         self.delete_json: bool = args.delete_json
-        self.touch_time: bool = args.touch
+        self.apply_capture_date_to_mtime: bool = args.touch
         self.workers: int = args.workers
         self.queue_size: int = args.queue
 
         self.mode_str: str = args.mode
-        self.modes: List[str] = self._parse_modes(args.mode)
+        self.date_discovery_strategies: List[str] = self._parse_modes(args.mode)
 
         self.allowed_extensions: Set[str] = set()
         if self.file_type in ['img', 'auto']:
@@ -148,7 +148,7 @@ class FileOrganizer:
 
         self.lock = threading.Lock()
         self.stats = {
-            'processed': 0,
+            'organized': 0,
             'skipped': 0,
             'deleted': 0,
             'errors': 0
@@ -275,7 +275,7 @@ class FileOrganizer:
         ext = filepath.suffix.lower()
 
         # --- 專屬 Takeout 模式邏輯 (Req 18) ---
-        if self.modes == ['takeout']:
+        if self.date_discovery_strategies == ['takeout']:
             # 條件 1: 檔案名稱必須以 IMG_ 開頭
             if not filepath.name.upper().startswith("IMG_"):
                 return None, "", None
@@ -311,7 +311,7 @@ class FileOrganizer:
 
         # --- 一般模式邏輯 ---
         # 影片檔強制僅使用 filename
-        current_modes = ['filename'] if ext in VIDEO_EXTENSIONS else self.modes
+        current_modes = ['filename'] if ext in VIDEO_EXTENSIONS else self.date_discovery_strategies
 
         for mode in current_modes:
             if mode == 'filename':
@@ -325,7 +325,7 @@ class FileOrganizer:
 
         return None, "Unknown", None
 
-    def _touch_file(self, filepath: Path, dt: datetime) -> None:
+    def _sync_file_timestamps(self, filepath: Path, dt: datetime) -> None:
         """
         強制修改檔案的時間 (Req 12, 18)。
         注意：在 Linux 系統中，ctime 為 Metadata 變更時間，通常無法直接由使用者空間修改，
@@ -343,8 +343,8 @@ class FileOrganizer:
     def _execute_operation(self, src: Path, dst: Path, dt: datetime, used_json: Optional[Path]) -> bool:
         """執行搬移或複製操作。"""
         if self.dry_run:
-            if self.touch_time:
-                self._touch_file(src, dt)
+            if self.apply_capture_date_to_mtime:
+                self._sync_file_timestamps(src, dt)
             return True
 
         try:
@@ -362,8 +362,8 @@ class FileOrganizer:
                     except OSError:
                         pass
 
-            if self.touch_time:
-                self._touch_file(dst, dt)
+            if self.apply_capture_date_to_mtime:
+                self._sync_file_timestamps(dst, dt)
 
             return True
 
@@ -397,7 +397,7 @@ class FileOrganizer:
     def _process_single_file(self, src_path: Path):
         """處理單一檔案的邏輯。"""
 
-        date_obj, source, used_json = self._determine_date(src_path)
+        date_obj, discovery_method, used_json = self._determine_date(src_path)
 
         if not date_obj:
             logger.debug(f"略過 (條件不符或無日期): {src_path}")
@@ -408,12 +408,12 @@ class FileOrganizer:
         target_name = src_path.name
 
         # Takeout 專屬改名邏輯 (Req 20)
-        if source == "Takeout":
+        if discovery_method == "Takeout":
             ext = src_path.suffix  # 保留原始副檔名與大小寫
             target_name = date_obj.strftime("IMG_%Y%m%d_%H%M%S") + ext
 
         # EXIF 模式且檔名為 IMG_數字 的改名邏輯 (Req 18)
-        if source == "EXIF" and re.match(r'^IMG_\d+$', src_path.stem, re.IGNORECASE):
+        if discovery_method == "EXIF" and re.match(r'^IMG_\d+$', src_path.stem, re.IGNORECASE):
             ext = src_path.suffix
             target_name = date_obj.strftime("IMG_%Y%m%d_%H%M%S") + ext
 
@@ -421,13 +421,13 @@ class FileOrganizer:
         month_str = date_obj.strftime("%m")
         date_folder = date_obj.strftime("%Y.%m.%d")
 
-        dest_dir = self.target / year_str / month_str / date_folder
+        dest_dir = self.destination_root / year_str / month_str / date_folder
         dest_path = dest_dir / target_name
 
         # 衝突檢查
         if dest_path.exists():
             if self._are_files_identical(src_path, dest_path):
-                if self.operation_mode == 'move' or self.allow_delete:
+                if self.operation_mode == 'move' or self.delete_duplicate_source:
                     logger.info(f"重複檔案 (刪除來源): {src_path}")
                     if not self.dry_run:
                         try:
@@ -445,8 +445,8 @@ class FileOrganizer:
                     with self.lock:
                         self.stats['skipped'] += 1
 
-                if self.touch_time and not self.dry_run:
-                    self._touch_file(dest_path, date_obj)
+                if self.apply_capture_date_to_mtime and not self.dry_run:
+                    self._sync_file_timestamps(dest_path, date_obj)
             else:
                 logger.warning(f"檔名衝突 (內容不同，略過): {src_path} -> {dest_path}")
                 with self.lock:
@@ -456,20 +456,20 @@ class FileOrganizer:
         op_name = "複製" if self.operation_mode == 'copy' else "搬移"
         prefix = "[DRY-RUN] " if self.dry_run else ""
 
-        logger.info(f"{prefix}{op_name} [{source}]: {src_path} -> {dest_path}")
+        logger.info(f"{prefix}{op_name} [{discovery_method}]: {src_path} -> {dest_path}")
 
         success = self._execute_operation(src_path, dest_path, date_obj, used_json)
 
         with self.lock:
             if success:
-                self.stats['processed'] += 1
+                self.stats['organized'] += 1
             else:
                 self.stats['errors'] += 1
 
     def _update_stats(self):
         """定期列印處理進度與速度 (Req 4)。"""
         with self.lock:
-            total = (self.stats['processed'] + self.stats['skipped'] +
+            total = (self.stats['organized'] + self.stats['skipped'] +
                      self.stats['deleted'] + self.stats['errors'])
 
             if total > 0 and total % REPORT_INTERVAL == 0:
@@ -478,7 +478,7 @@ class FileOrganizer:
                 if duration > 0:
                     rate = REPORT_INTERVAL / duration
                     logger.info(
-                        f"⚡ 進度統計 | 總計: {total} | 成功: {self.stats['processed']} | "
+                        f"⚡ 進度統計 | 總計: {total} | 成功: {self.stats['organized']} | "
                         f"略過: {self.stats['skipped']} | 刪除來源: {self.stats['deleted']} | "
                         f"批次耗時: {duration:.2f}s | 速度: {rate:.1f} file/s"
                     )
@@ -491,10 +491,10 @@ class FileOrganizer:
 
     def run(self):
         """主執行流程。"""
-        logger.info(f"啟動整理工具 | Workers: {self.workers} | Mode: {self.modes}")
+        logger.info(f"啟動整理工具 | Workers: {self.workers} | Mode: {self.date_discovery_strategies}")
         logger.info(
-            f"操作設定 | Action: {self.operation_mode.upper()} | DeleteDup: {self.allow_delete} | Touch: {self.touch_time}")
-        logger.info(f"目標路徑: {self.target}")
+            f"操作設定 | Action: {self.operation_mode.upper()} | DeleteDup: {self.delete_duplicate_source} | Touch: {self.apply_capture_date_to_mtime}")
+        logger.info(f"目標路徑: {self.destination_root}")
 
         monitor_thread = threading.Thread(target=self._monitor_queue_process, daemon=True)
         monitor_thread.start()
@@ -513,7 +513,7 @@ class FileOrganizer:
 
                 logger.info(f"開始掃描目錄: {src_root}")
                 for root, dirs, files in os.walk(src_root):
-                    if self.target in Path(root).parents or Path(root) == self.target:
+                    if self.destination_root in Path(root).parents or Path(root) == self.destination_root:
                         continue
 
                     for name in files:
